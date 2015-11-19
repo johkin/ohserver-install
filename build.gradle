@@ -1,0 +1,192 @@
+import javax.print.attribute.standard.Destination
+
+plugins {
+    id 'base'
+    id 'org.hidetake.ssh' version '1.1.4'
+    id "de.undercouch.download" version "2.0.0"
+}
+
+group 'se.acrend.ohserver'
+version '1.0-SNAPSHOT'
+
+
+ssh.settings {
+    knownHosts = allowAnyHosts
+    // dryRun = true
+}
+
+remotes {
+    ohserver {
+        host = '192.168.1.8'
+        user = 'pi'
+        password = 'raspberry'
+    }
+    ohserver2 {
+        host = '192.168.1.36'
+        user = 'pi'
+        password = 'raspberry'
+    }
+}
+
+task updatePackages << {
+    ssh.run {
+        session(remotes.ohserver2) {
+            execute 'sudo apt-get update -y'
+            execute 'sudo apt-get upgrade -y'
+        }
+    }
+}
+
+task setDnsName << {
+
+    updateHostName(remotes.ohserver2, 'ohserver2')
+
+}
+
+task setupUps << {
+
+    addPicoUps(remotes.ohserver2)
+
+}
+
+task setupOpenhab << {
+
+    addOpenHab(remotes.ohserver2)
+
+}
+
+task updateZwaveBinding << {
+
+    updateZwave(remotes.ohserver2)
+
+}
+
+task setupGit << {
+
+    addGitRepo(remotes.ohserver2)
+
+}
+
+def updateHostName(remote, hostname) {
+    ssh.run {
+        session(remote) {
+            execute 'sudo apt-get install avahi-daemon'
+
+            def contents = get from: '/etc/hosts' replace 'raspberrypi', hostname
+
+            put text: contents, into: 'temp-hosts'
+
+            execute 'sudo mv temp-hosts /etc/hosts'
+
+            contents = get from: '/etc/hostname' replace 'raspberrypi', hostname
+
+            put text: contents, into: 'temp-hostname'
+
+            execute 'sudo mv temp-hostname /etc/hostname'
+        }
+    }
+}
+
+def addPicoUps(remote) {
+    ssh.run {
+        session(remote) {
+            execute 'sudo apt-get install python'
+
+            put from: fileTree(file('pico-ups/')), into: './'
+
+            execute 'sudo chmod a+x *.py'
+            execute 'sudo chmod a+x rc.local'
+            execute 'sudo chown root:root rc.local'
+            execute 'sudo mv rc.local /etc/rc.local'
+        }
+    }
+}
+
+def addOpenHab(remote) {
+
+    mkdir buildDir
+
+    download {
+        src 'https://github.com/cdjackson/HABmin/raw/master/addons/org.openhab.io.habmin-1.7.0-SNAPSHOT.jar'
+        dest buildDir
+    }
+
+    download {
+        src 'https://github.com/cdjackson/HABmin/releases/download/0.1.3-snapshot/habmin.zip'
+        dest buildDir
+    }
+
+    ssh.run {
+        session(remote) {
+            def hasSources = execute('ls -C /etc/apt/sources.list.d/').contains('openhab')
+
+            if (!hasSources) {
+                execute 'wget -qO - \'https://bintray.com/user/downloadSubjectPublicKey?username=openhab\' | sudo apt-key add -'
+                execute 'echo \'deb http://dl.bintray.com/openhab/apt-repo stable main\' | sudo tee /etc/apt/sources.list.d/openhab.list'
+
+                execute 'sudo apt-get update -y'
+            }
+/*
+            execute 'sudo apt-get install openhab-runtime'
+            execute 'sudo apt-get install openhab-addon-binding-astro'
+            execute 'sudo apt-get install openhab-addon-binding-systeminfo'
+            execute 'sudo apt-get install openhab-addon-binding-zwave'
+            execute 'sudo apt-get install openhab-addon-io-myopenhab'
+            execute 'sudo apt-get install openhab-addon-persistence-rrd4j'
+*/
+            def hasLinks = execute('ls -C').contains('ohlogs')
+            if (!hasLinks) {
+                execute 'ln -s /etc/openhab/ ohconfig'
+                execute 'ln -s /usr/share/openhab/ ohinstall'
+                execute 'ln -s /var/log/openhab/ ohlogs'
+            }
+
+            def hasHabmin = execute('ls -C /usr/share/openhab/addons/').contains('habmin')
+            if (!hasHabmin) {
+                put from: buildDir.absolutePath + '/org.openhab.io.habmin-1.7.0-SNAPSHOT.jar', into: '.'
+                put from: buildDir.absolutePath + '/habmin.zip', into: '.'
+                execute 'sudo mv org.openhab.io.habmin-1.7.0-SNAPSHOT.jar /usr/share/openhab/addons/'
+                execute 'sudo unzip habmin.zip -d /usr/share/openhab/'
+            }
+
+            put from: 'sigar', into: '.'
+            execute 'sudo mv sigar /usr/share/openhab/lib'
+
+            execute 'sudo chown -R openhab:openhab /etc/openhab /usr/share/openhab /var/log/openhab'
+        }
+    }
+}
+
+def updateZwave(remote) {
+
+    mkdir(buildDir)
+
+    download {
+        src 'https://openhab.ci.cloudbees.com/job/openHAB/org.openhab.binding$org.openhab.binding.zwave/lastSuccessfulBuild/artifact/org.openhab.binding/org.openhab.binding.zwave/1.8.0-SNAPSHOT/org.openhab.binding.zwave-1.8.0-SNAPSHOT.jar'
+        dest buildDir
+    }
+
+    ssh.run {
+        session(remote) {
+            put from: buildDir.absolutePath + '/org.openhab.binding.zwave-1.8.0-SNAPSHOT.jar', into: '.'
+
+            execute 'sudo rm /usr/share/openhab/addons/*zwave*.jar'
+            execute 'sudo mv org.openhab.binding.zwave-1.8.0-SNAPSHOT.jar /usr/share/openhab/addons/'
+        }
+    }
+}
+
+
+def addGitRepo(remote) {
+
+    ssh.run {
+        session(remote) {
+            execute 'sudo apt-get install git-core'
+
+            execute 'mkdir -p git_repo/openhab_config.git'
+            execute 'git init --bare git_repo/openhab_config.git'
+
+            put from: 'git-hooks/post-receive', into: 'git_repo/openhab_config.git/hooks'
+        }
+    }
+}

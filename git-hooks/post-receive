@@ -1,0 +1,13 @@
+#!/bin/bash
+
+while read oldrev newrev ref
+do
+    if [[ $ref =~ .*/master$ ]];
+    then
+        echo "Master ref received.  Deploying master branch to config"
+        git --work-tree=/etc/openhab/ checkout -f master
+        sudo chown -R openhab:openhab /etc/openhab
+    else
+        echo "Ref $ref successfully received.  Doing nothing: only the master branch will be copied."
+    fi
+done
